@@ -1,0 +1,37 @@
+# Rust
+/target/
+Cargo.lock
+**/*.rs.bk
+*.pdb
+
+# Cursor/VSCode
+.vscode/
+.cursor/
+*.code-workspace
+
+# IDE
+.idea/
+.DS_Store
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+*.app
+
+# Environment
+.env
+.env.local
+
+# Build outputs
+*.o
+*.a
+*.so
+*.dylib
+
+# OS
+Thumbs.db
+
