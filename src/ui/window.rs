@@ -1,5 +1,9 @@
 use gtk4::prelude::*;
-use gtk4::{Application, ApplicationWindow, Box, Button, Image, Label, ListBox, Orientation, ScrolledWindow, Separator, Switch, Align, GestureDrag};
+use gtk4::{
+    Application, ApplicationWindow, Box, Button, CssProvider, GestureDrag, Image, Label, ListBox,
+    Orientation, ScrolledWindow, Separator, Switch, Align, STYLE_PROVIDER_PRIORITY_APPLICATION,
+    style_context_add_provider_for_display,
+};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -32,6 +36,21 @@ impl Window {
             .default_height(config.window_height)
             .resizable(true)
             .build();
+
+        let provider = CssProvider::new();
+        provider.load_from_data(
+            "window { background-color: rgba(0, 0, 0, 0.85); color: white; }
+             list { background-color: transparent; }
+             row { background-color: transparent; }
+             row:hover { background-color: rgba(255, 255, 255, 0.1); }
+             .dim-label { opacity: 0.7; }"
+        );
+        
+        style_context_add_provider_for_display(
+            &gtk4::prelude::WidgetExt::display(&window),
+            &provider,
+            STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
 
         let main_box = Box::builder()
             .orientation(Orientation::Vertical)
