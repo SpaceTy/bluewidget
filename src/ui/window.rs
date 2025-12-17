@@ -18,6 +18,7 @@ pub struct Window {
     pub status_label: Label,
     pub toggle_switch: Switch,
     bluetooth_service: Arc<Mutex<BluetoothService>>,
+    config: Config,
 }
 
 impl Window {
@@ -155,6 +156,7 @@ impl Window {
             status_label,
             toggle_switch,
             bluetooth_service,
+            config,
         };
 
         win.setup_signals(refresh_button, settings_button, close_button);
@@ -167,16 +169,26 @@ impl Window {
     fn setup_signals(&self, refresh_btn: Button, settings_btn: Button, close_btn: Button) {
         let service = self.bluetooth_service.clone();
         let status_label = self.status_label.clone();
+        let bt_enabled = self.config.enable_bluetooth_functionality;
 
         // Toggle Bluetooth
         self.toggle_switch.connect_state_set(move |_, state| {
-            if let Ok(service) = service.lock() {
+            if bt_enabled {
+                if let Ok(service) = service.lock() {
+                    if state {
+                        let _ = service.power_on();
+                        status_label.set_markup("<b>Bluetooth</b> <span foreground='green'>On</span>");
+                    } else {
+                        let _ = service.power_off();
+                        status_label.set_markup("<b>Bluetooth</b> <span foreground='red'>Off</span>");
+                    }
+                }
+            } else {
+                // UI testing mode - just update the label without actually changing bluetooth
                 if state {
-                    let _ = service.power_on();
-                    status_label.set_markup("<b>Bluetooth</b> <span foreground='green'>On</span>");
+                    status_label.set_markup("<b>Bluetooth</b> <span foreground='green'>On</span> <span foreground='orange'>(UI Test)</span>");
                 } else {
-                    let _ = service.power_off();
-                    status_label.set_markup("<b>Bluetooth</b> <span foreground='red'>Off</span>");
+                    status_label.set_markup("<b>Bluetooth</b> <span foreground='red'>Off</span> <span foreground='orange'>(UI Test)</span>");
                 }
             }
             // Trigger refresh
@@ -267,6 +279,7 @@ impl Window {
         let service = self.bluetooth_service.clone();
         let list_box = self.list_box.clone();
         let service_clone = self.bluetooth_service.clone();
+        let bt_enabled = self.config.enable_bluetooth_functionality;
 
         // Use channel to send devices from thread to main thread
         let (tx, rx) = mpsc::channel();
@@ -289,18 +302,22 @@ impl Window {
             if let Ok(devices) = rx.try_recv() {
                 for device in devices.iter() {
                     let row_widget = DeviceRow::new(device);
-                    
+
                     // Connect signals for row
                     if let Some(switch) = &row_widget.connect_switch {
                         let s = service_clone.clone();
                         let addr = device.address;
                         switch.connect_state_set(move |_, state| {
-                            if let Ok(service) = s.lock() {
-                                if state {
-                                    let _ = service.connect_device(addr);
-                                } else {
-                                    let _ = service.disconnect_device(addr);
+                            if bt_enabled {
+                                if let Ok(service) = s.lock() {
+                                    if state {
+                                        let _ = service.connect_device(addr);
+                                    } else {
+                                        let _ = service.disconnect_device(addr);
+                                    }
                                 }
+                            } else {
+                                println!("UI Test Mode: Would {} device {}", if state { "connect" } else { "disconnect" }, addr);
                             }
                             glib::Propagation::Proceed
                         });
@@ -310,8 +327,12 @@ impl Window {
                         let s = service_clone.clone();
                         let addr = device.address;
                         button.connect_clicked(move |_| {
-                            if let Ok(service) = s.lock() {
-                                let _ = service.pair_device(addr);
+                            if bt_enabled {
+                                if let Ok(service) = s.lock() {
+                                    let _ = service.pair_device(addr);
+                                }
+                            } else {
+                                println!("UI Test Mode: Would pair device {}", addr);
                             }
                         });
                     }

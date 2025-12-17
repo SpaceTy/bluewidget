@@ -13,6 +13,7 @@ pub struct Config {
     pub window_width: i32,
     pub window_height: i32,
     pub theme: String,
+    pub enable_bluetooth_functionality: bool,
 }
 
 impl Default for Config {
@@ -25,6 +26,7 @@ impl Default for Config {
             window_width: 300,
             window_height: 400,
             theme: "auto".to_string(),
+            enable_bluetooth_functionality: true,
         }
     }
 }
