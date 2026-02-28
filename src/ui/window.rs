@@ -1,6 +1,6 @@
 use gtk4::prelude::*;
 use gtk4::{
-    Application, ApplicationWindow, Box, Button, CssProvider, GestureDrag, Image, Label, ListBox,
+    Application, ApplicationWindow, Box, Button, CssProvider, EventControllerFocus, GestureClick, GestureDrag, Image, Label, ListBox,
     Orientation, ScrolledWindow, Separator, Switch, Align, STYLE_PROVIDER_PRIORITY_APPLICATION,
     style_context_add_provider_for_display,
 };
@@ -217,21 +217,61 @@ impl Window {
             let _ = std::process::Command::new("blueman-manager").spawn()
                 .or_else(|_| std::process::Command::new("gnome-control-center").arg("bluetooth").spawn());
         });
-        
-        // Close on focus lost
-        self.window.connect_is_active_notify(|win| {
-            if !win.is_active() {
-                println!("Window lost focus - closing");
-                // Delay close slightly to allow clicks to register
+
+        // Track if a click/touch is currently in progress
+        let click_in_progress = Arc::new(Mutex::new(false));
+
+        // Set up click gesture to track touch/click interactions
+        let click_gesture = GestureClick::new();
+        let click_flag = click_in_progress.clone();
+        click_gesture.connect_pressed(move |_, _, _, _| {
+            *click_flag.lock().unwrap() = true;
+            println!("Click/touch started");
+        });
+
+        let click_flag = click_in_progress.clone();
+        click_gesture.connect_released(move |_, _, _, _| {
+            let click_flag = click_flag.clone();
+            // Keep flag true for a bit after release to prevent premature closing
+            glib::timeout_add_local(Duration::from_millis(100), move || {
+                *click_flag.lock().unwrap() = false;
+                println!("Click/touch ended");
+                glib::ControlFlow::Break
+            });
+        });
+
+        self.window.add_controller(click_gesture);
+
+        // Close on focus lost using EventControllerFocus
+        // This properly handles touch interactions unlike is_active()
+        let focus_controller = EventControllerFocus::new();
+        let window_weak = self.window.downgrade();
+        let click_flag = click_in_progress.clone();
+
+        focus_controller.connect_leave(move |_| {
+            // This fires when focus leaves the window hierarchy entirely
+            println!("Focus left window");
+
+            // Don't close if a click/touch is in progress
+            if *click_flag.lock().unwrap() {
+                println!("Click in progress - not closing");
+                return;
+            }
+
+            if let Some(win) = window_weak.upgrade() {
+                // Small delay to allow any in-flight events to complete
                 let win_weak = win.downgrade();
                 glib::timeout_add_local(Duration::from_millis(50), move || {
-                    if let Some(win) = win_weak.upgrade() {
-                        win.close();
+                    if let Some(w) = win_weak.upgrade() {
+                        println!("Closing window");
+                        w.close();
                     }
                     glib::ControlFlow::Break
                 });
             }
         });
+
+        self.window.add_controller(focus_controller);
     }
 
     fn setup_gestures(&self) {
