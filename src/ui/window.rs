@@ -1,12 +1,12 @@
 use gtk4::prelude::*;
 use gtk4::{
-    Application, ApplicationWindow, Box, Button, CssProvider, EventControllerFocus, GestureClick, GestureDrag, Image, Label, ListBox,
-    Orientation, ScrolledWindow, Separator, Switch, Align, STYLE_PROVIDER_PRIORITY_APPLICATION,
-    style_context_add_provider_for_display,
+    style_context_add_provider_for_display, Align, Application, ApplicationWindow, Box, Button,
+    CssProvider, EventControllerFocus, GestureClick, GestureDrag, Image, Label, ListBox,
+    Orientation, ScrolledWindow, Separator, Switch, STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::bluetooth::BluetoothService;
 use crate::config::Config;
@@ -23,13 +23,27 @@ pub struct Window {
 
 impl Window {
     pub fn new(app: &Application) -> Self {
+        let overall_start = Instant::now();
+
+        let config_start = Instant::now();
         let config = Config::load();
+        println!(
+            "[SPEED] Config::load() took: {:.2?}",
+            config_start.elapsed()
+        );
+
+        let bt_start = Instant::now();
         let bluetooth_service = Arc::new(Mutex::new(BluetoothService::new().unwrap_or_else(|e| {
             eprintln!("Failed to initialize Bluetooth service: {}", e);
             // In a real app we might want to show an error dialog or exit
             panic!("Bluetooth service init failed");
         })));
+        println!(
+            "[SPEED] BluetoothService::new() took: {:.2?}",
+            bt_start.elapsed()
+        );
 
+        let window_start = Instant::now();
         let window = ApplicationWindow::builder()
             .application(app)
             .title("Bluetooth Widget")
@@ -37,20 +51,29 @@ impl Window {
             .default_height(config.window_height)
             .resizable(true)
             .build();
+        println!(
+            "[SPEED] ApplicationWindow::builder() took: {:.2?}",
+            window_start.elapsed()
+        );
 
+        let css_start = Instant::now();
         let provider = CssProvider::new();
         provider.load_from_data(
             "window { background-color: rgba(0, 0, 0, 0.85); color: white; }
              list { background-color: transparent; }
              row { background-color: transparent; }
              row:hover { background-color: rgba(255, 255, 255, 0.1); }
-             .dim-label { opacity: 0.7; }"
+             .dim-label { opacity: 0.7; }",
         );
-        
+
         style_context_add_provider_for_display(
             &gtk4::prelude::WidgetExt::display(&window),
             &provider,
             STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+        println!(
+            "[SPEED] CSS provider setup took: {:.2?}",
+            css_start.elapsed()
         );
 
         let main_box = Box::builder()
@@ -108,15 +131,13 @@ impl Window {
         header_box.append(&settings_button);
 
         // Toggle switch
-        let toggle_switch = Switch::builder()
-            .valign(Align::Center)
-            .build();
-        
+        let toggle_switch = Switch::builder().valign(Align::Center).build();
+
         // Set initial state
         if let Ok(service) = bluetooth_service.lock() {
             toggle_switch.set_active(service.is_powered());
         }
-        
+
         header_box.append(&toggle_switch);
 
         // Close button
@@ -144,7 +165,7 @@ impl Window {
         let list_box = ListBox::builder()
             .selection_mode(gtk4::SelectionMode::None)
             .build();
-        
+
         scrolled.set_child(Some(&list_box));
         main_box.append(&scrolled);
 
@@ -159,11 +180,133 @@ impl Window {
             config,
         };
 
+        let signals_start = Instant::now();
         win.setup_signals(refresh_button, settings_button, close_button);
+        println!(
+            "[SPEED] setup_signals() took: {:.2?}",
+            signals_start.elapsed()
+        );
+
+        let gestures_start = Instant::now();
         win.setup_gestures();
-        win.refresh_devices();
+        println!(
+            "[SPEED] setup_gestures() took: {:.2?}",
+            gestures_start.elapsed()
+        );
+
+        // Defer device loading until after window is presented
+        let list_box_weak = win.list_box.downgrade();
+        let service = win.bluetooth_service.clone();
+        let bt_enabled = win.config.enable_bluetooth_functionality;
+        glib::idle_add_local(move || {
+            if let Some(list_box) = list_box_weak.upgrade() {
+                Self::refresh_devices_deferred(&list_box, service.clone(), bt_enabled);
+            }
+            glib::ControlFlow::Break
+        });
+
+        println!(
+            "[SPEED] Window::new() total took: {:.2?}",
+            overall_start.elapsed()
+        );
 
         win
+    }
+
+    pub fn present(&self) {
+        self.window.present();
+    }
+
+    fn refresh_devices_deferred(
+        list_box: &ListBox,
+        bluetooth_service: Arc<Mutex<BluetoothService>>,
+        bt_enabled: bool,
+    ) {
+        let refresh_start = Instant::now();
+
+        // Clear list
+        while let Some(child) = list_box.first_child() {
+            list_box.remove(&child);
+        }
+
+        let list_box = list_box.clone();
+        let service_clone = bluetooth_service.clone();
+
+        // Use channel to send devices from thread to main thread
+        let (tx, rx) = mpsc::channel();
+
+        // Spawn thread to fetch devices
+        let service_for_thread = bluetooth_service.clone();
+        let thread_start = Instant::now();
+        thread::spawn(move || {
+            let devices = if let Ok(s) = service_for_thread.lock() {
+                s.get_devices()
+            } else {
+                vec![]
+            };
+            println!(
+                "[SPEED] Device fetching in thread took: {:.2?}",
+                thread_start.elapsed()
+            );
+            let _ = tx.send(devices);
+        });
+
+        // Receive devices on main thread and update UI
+        let list_box_clone = list_box.clone();
+        let ui_update_start = Instant::now();
+        glib::idle_add_local(move || {
+            if let Ok(devices) = rx.try_recv() {
+                let row_count = devices.len();
+                for device in devices.iter() {
+                    let row_widget = DeviceRow::new(device);
+
+                    if let Some(switch) = &row_widget.connect_switch {
+                        let s = service_clone.clone();
+                        let addr = device.address;
+                        let bt = bt_enabled;
+                        switch.connect_state_set(move |_, state| {
+                            if bt {
+                                if let Ok(service) = s.lock() {
+                                    if state {
+                                        let _ = service.connect_device(addr);
+                                    } else {
+                                        let _ = service.disconnect_device(addr);
+                                    }
+                                }
+                            }
+                            glib::Propagation::Proceed
+                        });
+                    }
+
+                    if let Some(button) = &row_widget.pair_button {
+                        let s = service_clone.clone();
+                        let addr = device.address;
+                        let bt = bt_enabled;
+                        button.connect_clicked(move |_| {
+                            if bt {
+                                if let Ok(service) = s.lock() {
+                                    let _ = service.pair_device(addr);
+                                }
+                            }
+                        });
+                    }
+
+                    list_box_clone.append(&row_widget.row);
+                }
+                println!(
+                    "[SPEED] UI update with {} devices took: {:.2?}",
+                    row_count,
+                    ui_update_start.elapsed()
+                );
+                println!(
+                    "[SPEED] Total refresh_devices() including async work: {:.2?}",
+                    refresh_start.elapsed()
+                );
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
+        });
     }
 
     fn setup_signals(&self, refresh_btn: Button, settings_btn: Button, close_btn: Button) {
@@ -198,10 +341,10 @@ impl Window {
 
         // Refresh button
         refresh_btn.connect_clicked(|_| {
-             // We need a way to call refresh_devices here. 
-             // For simplicity in this structure, we might need to rethink ownership or use channels.
-             // For now, let's just print.
-             println!("Refresh clicked");
+            // We need a way to call refresh_devices here.
+            // For simplicity in this structure, we might need to rethink ownership or use channels.
+            // For now, let's just print.
+            println!("Refresh clicked");
         });
 
         // Close button
@@ -214,8 +357,13 @@ impl Window {
 
         // Settings button
         settings_btn.connect_clicked(|_| {
-            let _ = std::process::Command::new("blueman-manager").spawn()
-                .or_else(|_| std::process::Command::new("gnome-control-center").arg("bluetooth").spawn());
+            let _ = std::process::Command::new("blueman-manager")
+                .spawn()
+                .or_else(|_| {
+                    std::process::Command::new("gnome-control-center")
+                        .arg("bluetooth")
+                        .spawn()
+                });
         });
 
         // Track if a click/touch is currently in progress
@@ -281,7 +429,7 @@ impl Window {
 
         let start_y_clone = start_y.clone();
         let start_time_clone = start_time.clone();
-        
+
         gesture.connect_drag_begin(move |_, _, y| {
             if let Ok(mut sy) = start_y_clone.lock() {
                 *sy = y;
@@ -295,10 +443,10 @@ impl Window {
         gesture.connect_drag_end(move |_, _, y| {
             let sy = *start_y.lock().unwrap();
             let st = *start_time.lock().unwrap();
-            
+
             let swipe_distance = sy - y; // Positive if swiping up
             let swipe_time = (glib::monotonic_time() - st) as f64 / 1_000_000.0;
-            
+
             if swipe_distance > 100.0 && swipe_time < 1.0 {
                 println!("Swipe up detected - closing");
                 if let Some(win) = window_weak.upgrade() {
@@ -308,82 +456,5 @@ impl Window {
         });
 
         self.window.add_controller(gesture);
-    }
-
-    pub fn refresh_devices(&self) {
-        // Clear list
-        while let Some(child) = self.list_box.first_child() {
-            self.list_box.remove(&child);
-        }
-
-        let service = self.bluetooth_service.clone();
-        let list_box = self.list_box.clone();
-        let service_clone = self.bluetooth_service.clone();
-        let bt_enabled = self.config.enable_bluetooth_functionality;
-
-        // Use channel to send devices from thread to main thread
-        let (tx, rx) = mpsc::channel();
-
-        // Spawn thread to fetch devices (without moving GTK widgets)
-        let service_for_thread = service.clone();
-        thread::spawn(move || {
-            let devices = if let Ok(s) = service_for_thread.lock() {
-                s.get_devices()
-            } else {
-                vec![]
-            };
-
-            let _ = tx.send(devices);
-        });
-
-        // Receive devices on main thread and update UI
-        let list_box_clone = list_box.clone();
-        glib::idle_add_local(move || {
-            if let Ok(devices) = rx.try_recv() {
-                for device in devices.iter() {
-                    let row_widget = DeviceRow::new(device);
-
-                    // Connect signals for row
-                    if let Some(switch) = &row_widget.connect_switch {
-                        let s = service_clone.clone();
-                        let addr = device.address;
-                        switch.connect_state_set(move |_, state| {
-                            if bt_enabled {
-                                if let Ok(service) = s.lock() {
-                                    if state {
-                                        let _ = service.connect_device(addr);
-                                    } else {
-                                        let _ = service.disconnect_device(addr);
-                                    }
-                                }
-                            } else {
-                                println!("UI Test Mode: Would {} device {}", if state { "connect" } else { "disconnect" }, addr);
-                            }
-                            glib::Propagation::Proceed
-                        });
-                    }
-
-                    if let Some(button) = &row_widget.pair_button {
-                        let s = service_clone.clone();
-                        let addr = device.address;
-                        button.connect_clicked(move |_| {
-                            if bt_enabled {
-                                if let Ok(service) = s.lock() {
-                                    let _ = service.pair_device(addr);
-                                }
-                            } else {
-                                println!("UI Test Mode: Would pair device {}", addr);
-                            }
-                        });
-                    }
-
-                    list_box_clone.append(&row_widget.row);
-                }
-                glib::ControlFlow::Break
-            } else {
-                // Keep checking until we receive the data
-                glib::ControlFlow::Continue
-            }
-        });
     }
 }
