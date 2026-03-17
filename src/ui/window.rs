@@ -4,6 +4,7 @@ use gtk4::{
     CssProvider, EventControllerFocus, GestureClick, GestureDrag, Image, Label, ListBox,
     Orientation, ScrolledWindow, Separator, Switch, STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
+use gtk4_layer_shell::{Edge as LayerShellEdge, Layer, LayerShell};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -49,8 +50,10 @@ impl Window {
             .title("Bluetooth Widget")
             .default_width(config.window_width)
             .default_height(config.window_height)
+            .decorated(false)
             .resizable(true)
             .build();
+        Self::configure_window_position(&window);
         println!(
             "[SPEED] ApplicationWindow::builder() took: {:.2?}",
             window_start.elapsed()
@@ -215,6 +218,69 @@ impl Window {
 
     pub fn present(&self) {
         self.window.present();
+    }
+
+    fn configure_window_position(window: &ApplicationWindow) {
+        if !gtk4_layer_shell::is_supported() {
+            eprintln!(
+                "gtk4-layer-shell is not supported on this compositor; using default window placement"
+            );
+            return;
+        }
+
+        window.init_layer_shell();
+        window.set_namespace(Some("bluetooth-widget"));
+        window.set_layer(Layer::Top);
+        window.set_anchor(LayerShellEdge::Top, true);
+        window.set_anchor(LayerShellEdge::Right, true);
+        window.set_exclusive_zone(0);
+
+        Self::apply_window_margins(window, None);
+
+        let window_weak = window.downgrade();
+        window.connect_map(move |_| {
+            if let Some(window) = window_weak.upgrade() {
+                let monitor = window
+                    .surface()
+                    .and_then(|surface| {
+                        gtk4::prelude::WidgetExt::display(&window).monitor_at_surface(&surface)
+                    });
+                Self::apply_window_margins(&window, monitor.as_ref());
+            }
+        });
+    }
+
+    fn apply_window_margins(window: &ApplicationWindow, monitor: Option<&gtk4::gdk::Monitor>) {
+        const MIN_EDGE_MARGIN: i32 = 24;
+        const RIGHT_MARGIN_RATIO: f64 = 0.10;
+        const TOP_MARGIN_RATIO: f64 = 0.02;
+
+        let monitor = monitor.cloned().or_else(|| Self::first_monitor(window));
+
+        let (top_margin, right_margin) = monitor
+            .map(|monitor| {
+                let geometry = monitor.geometry();
+                let top_margin =
+                    ((geometry.height() as f64) * TOP_MARGIN_RATIO).round() as i32;
+                let right_margin =
+                    ((geometry.width() as f64) * RIGHT_MARGIN_RATIO).round() as i32;
+
+                (
+                    top_margin.max(MIN_EDGE_MARGIN),
+                    right_margin.max(MIN_EDGE_MARGIN),
+                )
+            })
+            .unwrap_or((MIN_EDGE_MARGIN, 96));
+
+        window.set_margin(LayerShellEdge::Top, top_margin);
+        window.set_margin(LayerShellEdge::Right, right_margin);
+    }
+
+    fn first_monitor(window: &ApplicationWindow) -> Option<gtk4::gdk::Monitor> {
+        gtk4::prelude::WidgetExt::display(window)
+            .monitors()
+            .item(0)
+            .and_downcast::<gtk4::gdk::Monitor>()
     }
 
     fn refresh_devices_deferred(
